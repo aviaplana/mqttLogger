@@ -1,0 +1,12 @@
+{
+  "Email": "",
+  "MqttHost": "",
+  "MqttPort": 1883,
+  "MqttUser":	"",
+  "MqttPassword": "",
+  "DbHost":	"",
+  "DbPort": 3306,
+  "DbUser":	"",
+  "DbPassword":	"",
+  "DbName": ""
+}
