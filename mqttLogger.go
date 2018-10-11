@@ -38,7 +38,7 @@ type FridgeMsg struct {
 type MushroomMsg struct {
 	Temperature float32
 	Humidity float32
-	isLightOn bool			`json: humidifier`
+	isLightOn bool			`json: light`
 	isHumidifierOn bool		`json: humidifier`
 	isIntakeFanOn bool		`json: fan_intake`
 	isFanFlowOn bool		`json: fan_flow`
@@ -82,12 +82,16 @@ func main() {
 }
 
 func getConfig(configuration *Config) (error) {
-	//filename is the path to the json config file
 	file, err := os.Open("config.json")
+
 	if err != nil {  return err }
+
 	decoder := json.NewDecoder(file)
-	err = decoder.Decode(&configuration)
-	if err != nil {  return err }
+
+	if err = decoder.Decode(&configuration); err != nil {
+		return err
+	}
+
 	return nil
 }
 
