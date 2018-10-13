@@ -1,7 +1,7 @@
 {
   "Email": "",
   "MqttHost": "",
-  "MqttPort": 1883,
+  "MqttPort": 27017,
   "MqttUser":	"",
   "MqttPassword": "",
   "DbHost":	"",

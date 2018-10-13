@@ -1,15 +1,16 @@
 package main
 
 import (
+	. "./mail"
+	"encoding/json"
 	"fmt"
+	"github.com/aviaplana/mqttLogger/model"
+	"github.com/aviaplana/mqttLogger/mongo"
+	"log"
 	"os"
 	"os/signal"
-	"encoding/json"
-	"database/sql"
-	. "./mail"
 	"strconv"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/yosssi/gmq/mqtt"
 	"github.com/yosssi/gmq/mqtt/client"
 )
@@ -25,23 +26,6 @@ type Config struct {
 	DbUser string
 	DbPassword string
 	DbName string
-}
-
-type FridgeMsg struct {
-	Temperature float32
-	Humidity float32
-	Pressure float32
-	Compressor int
-	Goal float32	`json: goal`
-}
-
-type MushroomMsg struct {
-	Temperature float32
-	Humidity float32
-	isLightOn bool			`json: light`
-	isHumidifierOn bool		`json: humidifier`
-	isIntakeFanOn bool		`json: fan_intake`
-	isFanFlowOn bool		`json: fan_flow`
 }
 
 var mail Email
@@ -67,9 +51,11 @@ func main() {
 
 	mqttCli = getMqttClient(config.MqttHost, config.MqttPort, config.MqttUser, config.MqttPassword)
 	defer mqttCli.Terminate()
-	// Subscribe to topics
 
-	if err := subscribeTopics(db); err != nil {
+	// Subscribe to topics
+	fridgeMsgService := mongo.NewFridgeMsgService(db.Copy(), config.DbName, "fridge")
+	mushroomMsgService := mongo.NewMushroomMsgService(db.Copy(), config.DbName, "mushroom")
+	if err := subscribeTopics(fridgeMsgService, mushroomMsgService); err != nil {
 		handleError(err)
 	}
 
@@ -95,52 +81,41 @@ func getConfig(configuration *Config) (error) {
 	return nil
 }
 
-func subscribeTopics(db *sql.DB) (error) {
+func subscribeTopics(fridgeService *mongo.FridgeMsgService, mushroomService *mongo.MushroomMsgService) (error) {
 	return mqttCli.Subscribe(&client.SubscribeOptions{
 		SubReqs: []*client.SubReq{
 			{
-				TopicFilter: []byte("mqttLogger/status"),
+				TopicFilter: []byte("fridge/status"),
 				QoS:         mqtt.QoS0,
 				Handler: func(topicName, message []byte) {
 					fmt.Println(string(topicName[:]), " -> ", string(message[:]))
-					onReceiveFridgeMsg(message, db)
+					onReceiveFridgeMsg(message, fridgeService)
 				},
-			}, /*{
+			}, {
 				TopicFilter: []byte("mushroom/status"),
 				QoS:         mqtt.QoS0,
 				Handler: func(topicName, message []byte) {
-					onReceiveMushroomMsg(message, db)
+					fmt.Println(string(topicName[:]), " -> ", string(message[:]))
+					onReceiveMushroomMsg(message, mushroomService)
 				},
-			},*/
+			},
 		},
 	})
 }
 
-func onReceiveMushroomMsg(message []byte, db *sql.DB) {
-	mushroomStmt := getStmt(db, "INSERT INTO mqttLogger (temperature, humidity, pressure, compressor_on, goal_temperature) VALUES(?, ?, ?, ?, ? )")
-	defer mushroomStmt.Close()
+func onReceiveMushroomMsg(message []byte, service *mongo.MushroomMsgService) {
 
-	var mushroomMsg MushroomMsg
+	var mushroomMsg model.MushroomMsg
 	json.Unmarshal(message, &mushroomMsg)
 
-	_, err := mushroomStmt.Exec(
-		mushroomMsg.Temperature,
-		mushroomMsg.Humidity,
-		mushroomMsg.isLightOn,
-		mushroomMsg.isHumidifierOn,
-		mushroomMsg.isIntakeFanOn,
-		mushroomMsg.isFanFlowOn)
-
-	if err != nil {
+	if err := service.Create(&mushroomMsg); err != nil {
 		handleError(err)
 	}
 }
 
-func onReceiveFridgeMsg(message []byte, db *sql.DB) {
-	fridgeStmt := getStmt(db, "INSERT INTO mqttLogger (temperature, humidity, pressure, compressor_on, goal_temperature) VALUES(?, ?, ?, ?, ? )")
-	defer fridgeStmt.Close()
+func onReceiveFridgeMsg(message []byte, service *mongo.FridgeMsgService) {
+	var fridgeRead model.FridgeMsg
 
-	var fridgeRead FridgeMsg
 	json.Unmarshal(message, &fridgeRead)
 	if fridgeRead.Temperature == 0.0 {
 		if !mailSent {
@@ -152,21 +127,8 @@ func onReceiveFridgeMsg(message []byte, db *sql.DB) {
 		sendMailBackToWork()
 	}
 
-	storeFridgeMsg(fridgeStmt, fridgeRead)
-}
-
-func storeFridgeMsg(stmtIns *sql.Stmt, fridgeRead FridgeMsg) {
-	if fridgeRead.Temperature < 100 && fridgeRead.Humidity < 100 &&
-		fridgeRead.Temperature > -100 && fridgeRead.Humidity > -100 {
-		_, err := stmtIns.Exec(
-			fridgeRead.Temperature,
-			fridgeRead.Humidity,
-			fridgeRead.Pressure,
-			fridgeRead.Compressor,
-			fridgeRead.Goal)
-		if err != nil {
-			handleError(err)
-		}
+	if err := service.Create(&fridgeRead); err != nil {
+		handleError(err)
 	}
 }
 
@@ -216,24 +178,13 @@ func connectMqtt(mqttCli *client.Client, host string, port int, username string,
 	})
 }
 
-func connectDB(user string, password string, host string, port int, dbName string) (*sql.DB) {
-	db, err := sql.Open("mysql", user + ":" + password + "@tcp(" + host + ":" + strconv.Itoa(port) + ")/" + dbName )
-	if err != nil {
-		handleError(err)
-	} else {
-		fmt.Println("Connected to the database.")
-	}
+func connectDB(user string, password string, host string, port int, dbName string) (session *mongo.Session) {
 
-	return db
-}
-
-func getStmt(db *sql.DB, query string) (*sql.Stmt) {
-	stmtIns, err := db.Prepare(query)
+	session, err := mongo.NewSession(user + ":" + password + "@" + host + ":" + strconv.Itoa(port))
 
 	if err != nil {
-		handleError(err)
+		log.Fatalf("Unable to connect to mongo: %s", err)
 	}
 
-	return stmtIns
+	return session
 }
-
